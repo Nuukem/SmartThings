@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  garage-door-monitor:
+    build: .
+    container_name: garage-door-monitor
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - SMARTTHINGS_TOKEN=${SMARTTHINGS_TOKEN}
+      - GARAGE_DOOR_DEVICE_ID=${GARAGE_DOOR_DEVICE_ID}
+      - GO_TO_BED_ROUTINE_ID=${GO_TO_BED_ROUTINE_ID}
+      - ALEXA_DEVICE_NAME=${ALEXA_DEVICE_NAME}
+      - PORT=3000
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - smartthings-network
+
+networks:
+  smartthings-network:
+    driver: bridge
