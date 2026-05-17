@@ -2,16 +2,97 @@ const { SmartThingsClient, BearerTokenAuthenticator } = require('@smartthings/co
 const cron = require('node-cron');
 const axios = require('axios');
 const Pushover = require('pushover-notifications');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 // Configuration
 const ST_API_TOKEN = process.env.SMARTTHINGS_TOKEN;
 
-// Parse MONITORED_DEVICES - handle multiline JSON by removing whitespace
+function isCompleteJson(value) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (const char of value) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (char === '[' || char === '{') {
+      depth += 1;
+    } else if (char === ']' || char === '}') {
+      depth -= 1;
+    }
+  }
+
+  return depth === 0 && !inString;
+}
+
+function readMultilineEnvJson(key) {
+  const envPath = path.join(__dirname, '.env');
+
+  if (!fs.existsSync(envPath)) {
+    return null;
+  }
+
+  const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+  const startPattern = new RegExp(`^\\s*${key}\\s*=\\s*(.*)$`);
+  const startIndex = lines.findIndex(line => startPattern.test(line));
+
+  if (startIndex === -1) {
+    return null;
+  }
+
+  const firstValue = lines[startIndex].match(startPattern)[1];
+  const jsonLines = [firstValue];
+
+  for (let index = startIndex + 1; index < lines.length; index += 1) {
+    if (isCompleteJson(jsonLines.join('\n'))) {
+      break;
+    }
+
+    jsonLines.push(lines[index]);
+  }
+
+  return jsonLines.join('\n').trim();
+}
+
+function parseMonitoredDevices() {
+  const devicesEnv = (process.env.MONITORED_DEVICES || '[]').trim();
+
+  try {
+    return JSON.parse(devicesEnv);
+  } catch (error) {
+    const multilineDevicesEnv = readMultilineEnvJson('MONITORED_DEVICES');
+
+    if (multilineDevicesEnv && multilineDevicesEnv !== devicesEnv) {
+      return JSON.parse(multilineDevicesEnv);
+    }
+
+    throw error;
+  }
+}
+
+// Parse MONITORED_DEVICES from dotenv, with support for unquoted multiline JSON in .env.
 let MONITORED_DEVICES = [];
 try {
-  const devicesEnv = (process.env.MONITORED_DEVICES || '[]').replace(/\s+/g, ' ').trim();
-  MONITORED_DEVICES = JSON.parse(devicesEnv);
+  MONITORED_DEVICES = parseMonitoredDevices();
 } catch (error) {
   console.error('❌ Failed to parse MONITORED_DEVICES:', error.message);
   console.error('   Value:', process.env.MONITORED_DEVICES);
@@ -60,7 +141,7 @@ async function sendPushoverNotification(message) {
         priority: 2, // Emergency priority - pushes through silent
         retry: 60,   // Retry every 60 seconds
         expire: 300, // Expire after 5 minutes
-        sound: 'incoming'
+        sound: 'spacealarm' // Optional: specify a sound for emergency alerts
       }, function(err, result) {
         if (err) {
           console.error('❌ Failed to send Pushover notification:', err.message);
@@ -139,6 +220,46 @@ async function getDevice(deviceId) {
 }
 
 /**
+ * Get a capability attribute value from supported SmartThings capability structures
+ */
+function getCapabilityAttributeValue(cap, attribute) {
+  if (!cap) {
+    return undefined;
+  }
+
+  if (cap.values) {
+    const raw = cap.values[attribute];
+    if (raw?.value !== undefined) {
+      return raw.value;
+    }
+    return raw;
+  }
+
+  if (Array.isArray(cap.status)) {
+    const statusEntry = cap.status.find(entry => entry.attribute === attribute);
+    if (statusEntry?.value !== undefined) {
+      return statusEntry.value;
+    }
+    if (cap.status[0]?.value !== undefined) {
+      return cap.status[0].value;
+    }
+  }
+
+  if (cap[attribute] !== undefined) {
+    if (cap[attribute]?.value !== undefined) {
+      return cap[attribute].value;
+    }
+    return cap[attribute];
+  }
+
+  if (cap.value !== undefined) {
+    return cap.value;
+  }
+
+  return undefined;
+}
+
+/**
  * Check if a device is open
  * Handles both door locks and contact sensors
  */
@@ -151,42 +272,52 @@ async function checkDeviceStatus(deviceId) {
       return null;
     }
 
-    // Try to get door/contact status from capabilities
+    // Device capabilities describe what a device supports; status contains the live values.
     const capabilities = device.components[0]?.capabilities || [];
+    const componentId = device.components[0]?.id || 'main';
+    const deviceStatus = await client.devices.getStatus(deviceId);
+    const componentStatus = deviceStatus.components?.[componentId] || deviceStatus.components?.main;
     
     // DEBUG: Log all capabilities found on this device
-    console.log(`🔍 DEBUG: Device ${deviceId} has ${capabilities.length} capability(ies):`);
+    /* console.log(`🔍 DEBUG: Device ${deviceId} has ${capabilities.length} capability(ies):`);
     capabilities.forEach((cap, idx) => {
-      console.log(`   [${idx}] Full capability object:`, JSON.stringify(cap, null, 2));
-    });
+      console.log(`   [${idx}] id=${cap.id} version=${cap.version}`);
+      console.log(`       ${JSON.stringify(cap, null, 2)}`);
+    }); */
+
+    if (!componentStatus) {
+      console.warn(`⚠️  No status found for component "${componentId}" on device ${deviceId}`);
+      console.log(`💡 DEBUG: Status payload: ${JSON.stringify(deviceStatus, null, 2)}`);
+      return null;
+    }
+    
+    console.log(`🔍 DEBUG: Status capabilities found: ${Object.keys(componentStatus).join(', ')}`);
     
     // Check for door lock capability
     const doorLockCap = capabilities.find(cap => cap.id === 'doorControl' || cap.id === 'lock');
-    if (doorLockCap?.values?.door?.value) {
-      console.log(`✅ DEBUG: Found doorControl/lock - value: ${doorLockCap.values.door.value}`);
-      return doorLockCap.values.door.value;
+    const doorStatusCap = doorLockCap ? componentStatus[doorLockCap.id] : undefined;
+    const doorStatus = getCapabilityAttributeValue(doorStatusCap, 'door') || getCapabilityAttributeValue(doorStatusCap, 'lock');
+    if (doorStatus !== undefined) {
+      console.log(`✅ DEBUG: Found door lock capability value: ${doorStatus}`);
+      return doorStatus;
     }
 
     // Check for contact sensor capability
     const contactCap = capabilities.find(cap => cap.id === 'contactSensor');
-    if (contactCap) {
-      console.log(`   Found contactSensor capability`);
-      console.log(`   contactCap full object: ${JSON.stringify(contactCap, null, 2)}`);
-      // Try different path structures
-      const contactValue = contactCap.values?.contact?.value || contactCap.values?.contact;
-      if (contactValue) {
-        console.log(`✅ DEBUG: Found contactSensor - value: ${contactValue}`);
-        return contactValue;
-      } else {
-        console.log(`   ⚠️  contactSensor found but no value at expected paths`);
-      }
+    const contactStatusCap = contactCap ? componentStatus[contactCap.id] : undefined;
+    const contactStatus = getCapabilityAttributeValue(contactStatusCap, 'contact');
+    if (contactStatus !== undefined) {
+      console.log(`✅ DEBUG: Found contactSensor capability value: ${contactStatus}`);
+      return contactStatus;
     }
 
-    // Check for generic switch/sensor capability
+    // Check for generic switch capability
     const switchCap = capabilities.find(cap => cap.id === 'switch');
-    if (switchCap?.values?.switch?.value) {
-      console.log(`✅ DEBUG: Found switch - value: ${switchCap.values.switch.value}`);
-      return switchCap.values.switch.value;
+    const switchStatusCap = switchCap ? componentStatus[switchCap.id] : undefined;
+    const switchStatus = getCapabilityAttributeValue(switchStatusCap, 'switch');
+    if (switchStatus !== undefined) {
+      console.log(`✅ DEBUG: Found switch capability value: ${switchStatus}`);
+      return switchStatus;
     }
 
     console.warn(`⚠️  No recognized capability found for device ${deviceId}`);
