@@ -8,6 +8,13 @@ require('dotenv').config();
 
 // Configuration
 const ST_API_TOKEN = process.env.SMARTTHINGS_TOKEN;
+const DEBUG_LOGGING = process.env.DEBUG_LOGGING === 'true';
+
+function debugLog(...args) {
+  if (DEBUG_LOGGING) {
+    console.log(...args);
+  }
+}
 
 function isCompleteJson(value) {
   let depth = 0;
@@ -73,7 +80,24 @@ function readMultilineEnvJson(key) {
   return jsonLines.join('\n').trim();
 }
 
-function parseMonitoredDevices() {
+// Accepts an explicit JSON string/object for tests or callers; otherwise reads MONITORED_DEVICES.
+function parseMonitoredDevices(devicesJson) {
+  if (devicesJson !== undefined) {
+    if (typeof devicesJson === 'string') {
+      return JSON.parse(devicesJson.trim() || '[]');
+    }
+
+    if (Array.isArray(devicesJson)) {
+      return devicesJson;
+    }
+
+    if (devicesJson && typeof devicesJson === 'object') {
+      return [devicesJson];
+    }
+
+    throw new TypeError('MONITORED_DEVICES must be a JSON string, array, or object');
+  }
+
   const devicesEnv = (process.env.MONITORED_DEVICES || '[]').trim();
 
   try {
@@ -138,16 +162,16 @@ async function sendPushoverNotification(message) {
       pushover.send({
         title: '🚨 Door/Device Alert',
         message: message,
-        priority: 2, // Emergency priority - pushes through silent
+        priority: process.env.PUSHOVER_PRIORITY || 1, // 2 = Emergency, 1 = High, 0 = Normal, -1 = Low
         retry: 60,   // Retry every 60 seconds
         expire: 300, // Expire after 5 minutes
-        sound: 'spacealarm' // Optional: specify a sound for emergency alerts
+        sound: process.env.PUSHOVER_SOUND || null // Optional: specify a sound for emergency alerts
       }, function(err, result) {
         if (err) {
           console.error('❌ Failed to send Pushover notification:', err.message);
           reject(err);
         } else {
-          console.log(`✅ Pushover notification sent (Emergency priority): "${message}"`);
+          debugLog(`✅ Pushover notification sent (Emergency priority): "${message}"`);
           resolve(result);
         }
       });
@@ -157,47 +181,15 @@ async function sendPushoverNotification(message) {
   }
 }
 
-/**
- * Trigger virtual device to activate Alexa routine
- * Virtual devices act as a workaround to trigger routines via SmartThings
- */
-async function triggerVirtualDevice(virtualDeviceId, deviceName) {
-  if (!virtualDeviceId) {
-    console.log(`ℹ️  No virtual device configured for ${deviceName} - skipping Alexa routine trigger`);
-    return;
-  }
-
+async function turnOffVirtualDevice(virtualDeviceId, deviceName) {
   try {
-    // Get the virtual device
-    const device = await getDevice(virtualDeviceId);
-    if (!device) {
-      console.warn(`⚠️  Virtual device not found: ${virtualDeviceId}`);
-      return;
-    }
-
-    // Toggle a virtual switch to trigger the associated Alexa routine
-    // This works because Alexa routines can be triggered by switch state changes
     await client.devices.executeCommand(virtualDeviceId, {
       capability: 'switch',
-      command: 'on'
+      command: 'off'
     });
-
-    console.log(`✅ Triggered virtual device for ${deviceName} (Alexa routine will execute)`);
-
-    // Turn off after a short delay to reset the switch
-    setTimeout(async () => {
-      try {
-        await client.devices.executeCommand(virtualDeviceId, {
-          capability: 'switch',
-          command: 'off'
-        });
-      } catch (error) {
-        console.warn(`⚠️  Failed to reset virtual device: ${error.message}`);
-      }
-    }, 1000);
-
+    debugLog(`✅ Reset virtual device for ${deviceName} (${virtualDeviceId}) to off`);
   } catch (error) {
-    console.error(`❌ Failed to trigger virtual device for ${deviceName}:`, error.message);
+    console.warn(`⚠️  Failed to reset virtual device for ${deviceName}: ${error.message}`);
   }
 }
 
@@ -278,27 +270,24 @@ async function checkDeviceStatus(deviceId) {
     const deviceStatus = await client.devices.getStatus(deviceId);
     const componentStatus = deviceStatus.components?.[componentId] || deviceStatus.components?.main;
     
-    // DEBUG: Log all capabilities found on this device
-    /* console.log(`🔍 DEBUG: Device ${deviceId} has ${capabilities.length} capability(ies):`);
-    capabilities.forEach((cap, idx) => {
-      console.log(`   [${idx}] id=${cap.id} version=${cap.version}`);
-      console.log(`       ${JSON.stringify(cap, null, 2)}`);
-    }); */
-
     if (!componentStatus) {
       console.warn(`⚠️  No status found for component "${componentId}" on device ${deviceId}`);
-      console.log(`💡 DEBUG: Status payload: ${JSON.stringify(deviceStatus, null, 2)}`);
+      debugLog(`🔍 SmartThings status payload for ${deviceId}: ${JSON.stringify(deviceStatus, null, 2)}`);
       return null;
     }
-    
-    console.log(`🔍 DEBUG: Status capabilities found: ${Object.keys(componentStatus).join(', ')}`);
+
+    debugLog(`🔍 SmartThings payload for ${deviceId}: ${JSON.stringify({
+      componentId,
+      declaredCapabilities: capabilities.map(cap => `${cap.id}@${cap.version || 'unknown'}`),
+      statusCapabilities: Object.keys(componentStatus)
+    }, null, 2)}`);
     
     // Check for door lock capability
     const doorLockCap = capabilities.find(cap => cap.id === 'doorControl' || cap.id === 'lock');
     const doorStatusCap = doorLockCap ? componentStatus[doorLockCap.id] : undefined;
     const doorStatus = getCapabilityAttributeValue(doorStatusCap, 'door') || getCapabilityAttributeValue(doorStatusCap, 'lock');
     if (doorStatus !== undefined) {
-      console.log(`✅ DEBUG: Found door lock capability value: ${doorStatus}`);
+      debugLog(`✅ Resolved ${deviceId} status from ${doorLockCap.id}: ${doorStatus}`);
       return doorStatus;
     }
 
@@ -307,7 +296,7 @@ async function checkDeviceStatus(deviceId) {
     const contactStatusCap = contactCap ? componentStatus[contactCap.id] : undefined;
     const contactStatus = getCapabilityAttributeValue(contactStatusCap, 'contact');
     if (contactStatus !== undefined) {
-      console.log(`✅ DEBUG: Found contactSensor capability value: ${contactStatus}`);
+      debugLog(`✅ Resolved ${deviceId} status from contactSensor: ${contactStatus}`);
       return contactStatus;
     }
 
@@ -316,12 +305,12 @@ async function checkDeviceStatus(deviceId) {
     const switchStatusCap = switchCap ? componentStatus[switchCap.id] : undefined;
     const switchStatus = getCapabilityAttributeValue(switchStatusCap, 'switch');
     if (switchStatus !== undefined) {
-      console.log(`✅ DEBUG: Found switch capability value: ${switchStatus}`);
+      debugLog(`✅ Resolved ${deviceId} status from switch: ${switchStatus}`);
       return switchStatus;
     }
 
     console.warn(`⚠️  No recognized capability found for device ${deviceId}`);
-    console.log(`💡 TIP: Check the debug output above to see what capabilities are available and report them`);
+    debugLog(`💡 Enable DEBUG_LOGGING=true to inspect SmartThings capabilities and status payloads.`);
     return null;
   } catch (error) {
     console.error('❌ Failed to check device status:', error.message);
@@ -344,9 +333,9 @@ async function checkAllDevices(checkAtTime = null) {
       const deviceCheckTime = device.checkTime || '21:00';
       return deviceCheckTime === checkAtTime;
     });
-    console.log(`🔍 Checking ${devicesToCheck.length} device(s) scheduled for ${checkAtTime}...`);
+    debugLog(`🔍 Checking ${devicesToCheck.length} device(s) scheduled for ${checkAtTime}...`);
   } else {
-    console.log(`🔍 Checking ${devicesToCheck.length} monitored device(s)...`);
+    debugLog(`🔍 Checking ${devicesToCheck.length} monitored device(s)...`);
   }
   
   const openDevices = [];
@@ -363,9 +352,9 @@ async function checkAllDevices(checkAtTime = null) {
       });
       console.warn(`⚠️  ${deviceConfig.name} is OPEN`);
     } else if (status === 'closed' || status === 'clear') {
-      console.log(`✅ ${deviceConfig.name} is closed`);
+      debugLog(`✅ ${deviceConfig.name} is closed`);
     } else if (status) {
-      console.log(`ℹ️  ${deviceConfig.name} status: ${status}`);
+      debugLog(`ℹ️  ${deviceConfig.name} status: ${status}`);
     }
   }
   
@@ -380,7 +369,7 @@ async function handleDeviceCheck(checkAtTime = null) {
   const openDevices = await checkAllDevices(checkAtTime);
   
   if (openDevices.length === 0) {
-    console.log('✅ All monitored devices are closed - all good!');
+    debugLog('✅ All monitored devices are closed - all good!');
     return;
   }
 
@@ -397,13 +386,52 @@ async function handleDeviceCheck(checkAtTime = null) {
 
   // Send Pushover notification (Emergency priority - pushes through silent phone)
   await sendPushoverNotification(message);
+}
 
-  // Trigger virtual devices to activate Alexa routines
-  for (const device of openDevices) {
-    const deviceConfig = MONITORED_DEVICES.find(d => d.id === device.id);
-    if (deviceConfig?.virtualDeviceId) {
-      await triggerVirtualDevice(deviceConfig.virtualDeviceId, device.name);
+function getSubscriptionDeviceEvents(payload) {
+  const events = payload?.eventData?.events || payload?.events || [];
+
+  return events
+    .filter(event => event.eventType === 'DEVICE_EVENT' && event.deviceEvent)
+    .map(event => event.deviceEvent);
+}
+
+function isOpenStatus(status) {
+  return status === 'open' || status === 'detected';
+}
+
+function getVirtualDeviceTriggerConfig(deviceEvent) {
+  if (
+    (deviceEvent.componentId || 'main') !== 'main'
+    || deviceEvent.capability !== 'switch'
+    || deviceEvent.attribute !== 'switch'
+    || deviceEvent.value !== 'on'
+  ) {
+    return null;
+  }
+
+  return MONITORED_DEVICES.find(device => device.virtualDeviceId === deviceEvent.deviceId) || null;
+}
+
+async function handleVirtualDeviceTrigger(deviceConfig) {
+  try {
+    debugLog(`🔔 Virtual trigger received for ${deviceConfig.name}; checking associated device ${deviceConfig.id}`);
+
+    const status = await checkDeviceStatus(deviceConfig.id);
+
+    if (isOpenStatus(status)) {
+      const message = `${deviceConfig.name} is still open`;
+      console.warn(`⚠️  ${message}`);
+      await sendPushoverNotification(message);
+    } else if (status === 'closed' || status === 'clear') {
+      debugLog(`✅ ${deviceConfig.name} is closed`);
+    } else if (status) {
+      debugLog(`ℹ️  ${deviceConfig.name} status: ${status}`);
     }
+  } catch (error) {
+    console.error(`❌ Failed to handle virtual trigger for ${deviceConfig.name}:`, error.message);
+  } finally {
+    await turnOffVirtualDevice(deviceConfig.virtualDeviceId, deviceConfig.name);
   }
 }
 
@@ -423,12 +451,12 @@ function schedulePeriodicChecks() {
     const cronExpression = `${minutes} ${hours} * * *`;
     
     const job = cron.schedule(cronExpression, () => {
-      console.log(`⏰ Running scheduled check at ${checkTime}...`);
+      debugLog(`⏰ Running scheduled check at ${checkTime}...`);
       handleDeviceCheck(checkTime);
     });
 
     scheduledJobs.push({ time: checkTime, job });
-    console.log(`📅 Scheduled device check at ${checkTime} (cron: ${cronExpression})`);
+    debugLog(`📅 Scheduled device check at ${checkTime} (cron: ${cronExpression})`);
   });
 
   return scheduledJobs;
@@ -448,15 +476,44 @@ function startWebhookServer() {
   app.post('/webhook/routine-triggered', async (req, res) => {
     const { routineId, routineName } = req.body;
     
-    console.log(`🔔 Routine triggered: ${routineName} (${routineId})`);
+    debugLog(`🔔 Routine triggered: ${routineName} (${routineId})`);
     
     if (routineId === ROUTINE_ID || routineName?.includes('Go To Bed')) {
-      console.log('🛏️  "Go To Bed" routine detected - checking ALL devices...');
+      debugLog('🛏️  "Go To Bed" routine detected - checking ALL devices...');
       // When routine triggers, check ALL devices regardless of their scheduled checkTime
       await handleDeviceCheck(null);
     }
 
     res.json({ success: true });
+  });
+
+  // SmartThings subscription endpoint - called when monitored virtual trigger devices turn on
+  app.post('/smartthings/events', async (req, res) => {
+    const lifecycle = req.body?.lifecycle;
+
+    if (lifecycle && lifecycle !== 'EVENT') {
+      debugLog(`ℹ️  Ignoring SmartThings lifecycle: ${lifecycle}`);
+      return res.json({ success: true });
+    }
+
+    const triggeredDeviceConfigs = getSubscriptionDeviceEvents(req.body)
+      .map(getVirtualDeviceTriggerConfig)
+      .filter(Boolean);
+
+    if (triggeredDeviceConfigs.length === 0) {
+      debugLog('ℹ️  SmartThings event received but it did not match any monitored virtual trigger device');
+      return res.json({ success: true, checked: false });
+    }
+
+    const uniqueDeviceConfigs = [
+      ...new Map(triggeredDeviceConfigs.map(device => [device.virtualDeviceId, device])).values()
+    ];
+
+    for (const deviceConfig of uniqueDeviceConfigs) {
+      await handleVirtualDeviceTrigger(deviceConfig);
+    }
+
+    res.json({ success: true, checked: true, checkedCount: uniqueDeviceConfigs.length });
   });
 
   // Health check endpoint
@@ -482,10 +539,10 @@ function startWebhookServer() {
   });
 
   app.listen(PORT, () => {
-    console.log(`🚀 Webhook server listening on port ${PORT}`);
-    console.log(`   Health check: http://<your-nas-ip>:${PORT}/health`);
-    console.log(`   Manual check: http://<your-nas-ip>:${PORT}/check (GET or POST)`);
-    console.log(`   Routine trigger: POST http://<your-nas-ip>:${PORT}/webhook/routine-triggered`);
+    debugLog(`🚀 Webhook server listening on port ${PORT}`);
+    debugLog(`   Health check: http://<your-nas-ip>:${PORT}/health`);
+    debugLog(`   Manual check: http://<your-nas-ip>:${PORT}/check (GET or POST)`);
+    debugLog(`   Routine trigger event: POST http://<your-nas-ip>:${PORT}/smartthings/events`);
   });
 
   return app;
@@ -495,23 +552,23 @@ function startWebhookServer() {
  * Initialize the application
  */
 async function initialize() {
-  console.log('🚀 Starting Device Monitor...');
-  console.log(`📱 Using SmartThings API Token: ${ST_API_TOKEN?.substring(0, 10)}...`);
+  debugLog('🚀 Starting Device Monitor...');
+  debugLog(`📱 Using SmartThings API Token: ${ST_API_TOKEN?.substring(0, 10)}...`);
   
   // Check Pushover configuration
   if (!PUSHOVER_USER_KEY || !PUSHOVER_API_TOKEN) {
     console.warn('⚠️  Pushover not configured - notifications will be limited');
   } else {
-    console.log('✅ Pushover configured - Emergency priority notifications enabled');
+    debugLog('✅ Pushover configured - Emergency priority notifications enabled');
   }
 
-  console.log(`📊 Monitoring ${MONITORED_DEVICES.length} device(s):`);
+  debugLog(`📊 Monitoring ${MONITORED_DEVICES.length} device(s):`);
   
   MONITORED_DEVICES.forEach((device, index) => {
     const checkTime = device.checkTime || '21:00';
-    console.log(`   ${index + 1}. ${device.name} (${device.id}) - Check at ${checkTime}`);
+    debugLog(`   ${index + 1}. ${device.name} (${device.id}) - Check at ${checkTime}`);
     if (device.virtualDeviceId) {
-      console.log(`      → Virtual device: ${device.virtualDeviceId} (triggers Alexa routine)`);
+      debugLog(`      → Virtual trigger device: ${device.virtualDeviceId}`);
     }
   });
 
@@ -523,7 +580,7 @@ async function initialize() {
   try {
     // Verify API token works
     const devices = await client.devices.list();
-    console.log(`✅ Connected to SmartThings - found ${devices.length} total device(s)`);
+    debugLog(`✅ Connected to SmartThings - found ${devices.length} total device(s)`);
 
     // Verify all monitored devices exist
     for (const deviceConfig of MONITORED_DEVICES) {
@@ -531,7 +588,7 @@ async function initialize() {
       if (!device) {
         throw new Error(`Device not found: ${deviceConfig.name} (${deviceConfig.id})`);
       }
-      console.log(`✅ ${deviceConfig.name} found`);
+      debugLog(`✅ ${deviceConfig.name} found`);
 
       // Verify virtual device if configured
       if (deviceConfig.virtualDeviceId) {
@@ -539,17 +596,13 @@ async function initialize() {
         if (!virtualDevice) {
           throw new Error(`Virtual device not found for ${deviceConfig.name} (${deviceConfig.virtualDeviceId})`);
         }
-        console.log(`   ✅ Virtual device found (${virtualDevice.name})`);
+        debugLog(`   ✅ Virtual device found (${virtualDevice.name})`);
       }
     }
 
     // Start services
     schedulePeriodicChecks();
     startWebhookServer();
-
-    // Perform initial check
-    console.log('\n📋 Performing initial device check...');
-    await handleDeviceCheck();
 
   } catch (error) {
     console.error('❌ Initialization failed:', error.message);
