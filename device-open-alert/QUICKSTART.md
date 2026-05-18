@@ -18,9 +18,9 @@
 **On your Windows PC:**
 
 1. Open Command Prompt (Win + R, type `cmd`, press Enter)
-2. Navigate to the `garage-monitor` folder:
+2. Navigate to the `device-open-alert` folder:
    ```
-   cd C:\Users\philg\Syno_Phil\www\SmartThings\garage-monitor
+   cd C:\www\SmartThings\device-open-alert
    ```
 3. Run:
    ```
@@ -34,7 +34,7 @@
 
 ## 3️⃣ Create Configuration File (2 minutes)
 
-1. In VS Code, open: `garage-monitor` folder
+1. In VS Code, open: `device-open-alert` folder
 2. Rename `.env.example` to `.env` (right-click → Rename)
 3. Edit `.env` and fill in:
    ```
@@ -86,7 +86,7 @@ Before deploying to NAS, test it works:
    ssh admin@<your-nas-ip>
    ```
 
-2. Copy your entire `garage-monitor` folder to NAS (use WinSCP or similar)
+2. Copy your entire `device-open-alert` folder to NAS (use WinSCP or similar)
 
 3. Navigate to the folder and start:
    ```
@@ -101,7 +101,7 @@ Before deploying to NAS, test it works:
 ### Option B: Using Node.js on NAS
 
 1. SSH into your NAS
-2. Navigate to the `garage-monitor` folder
+2. Navigate to the `device-open-alert` folder
 3. Run:
    ```
    npm install

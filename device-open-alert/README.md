@@ -181,7 +181,7 @@ When any of these devices open, the monitor will:
 
 #### Option A: Docker (Recommended)
 
-1. Copy the entire `garage-monitor` folder to your NAS
+1. Copy the entire `device-open-alert` folder to your NAS
 2. SSH into your NAS:
    ```bash
    ssh admin@192.168.1.xxx
