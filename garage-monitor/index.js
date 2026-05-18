@@ -370,7 +370,11 @@ async function handleDeviceCheck(checkAtTime = null) {
   
   if (openDevices.length === 0) {
     debugLog('✅ All monitored devices are closed - all good!');
-    return;
+    return {
+      openDevices,
+      notificationSent: false,
+      message: null
+    };
   }
 
   // Build notification message
@@ -386,6 +390,12 @@ async function handleDeviceCheck(checkAtTime = null) {
 
   // Send Pushover notification (Emergency priority - pushes through silent phone)
   await sendPushoverNotification(message);
+
+  return {
+    openDevices,
+    notificationSent: true,
+    message
+  };
 }
 
 function getSubscriptionDeviceEvents(payload) {
@@ -538,10 +548,27 @@ function startWebhookServer() {
     });
   });
 
+  // Endpoint to test the full alert flow on-demand
+  app.all('/test', async (req, res) => {
+    // Optional query parameter: ?time=HH:MM to test only devices scheduled for that time
+    const checkTime = req.query.time || null;
+    const result = await handleDeviceCheck(checkTime);
+
+    res.json({
+      timestamp: new Date().toISOString(),
+      checkTime: checkTime || 'all',
+      monitoredCount: MONITORED_DEVICES.length,
+      notificationSent: result.notificationSent,
+      message: result.message,
+      openDevices: result.openDevices
+    });
+  });
+
   app.listen(PORT, () => {
     debugLog(`🚀 Webhook server listening on port ${PORT}`);
     debugLog(`   Health check: http://<your-nas-ip>:${PORT}/health`);
     debugLog(`   Manual check: http://<your-nas-ip>:${PORT}/check (GET or POST)`);
+    debugLog(`   Full alert test: http://<your-nas-ip>:${PORT}/test (GET or POST)`);
     debugLog(`   Routine trigger event: POST http://<your-nas-ip>:${PORT}/smartthings/events`);
   });
 
