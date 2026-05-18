@@ -483,8 +483,8 @@ function startWebhookServer() {
   app.use(express.json());
 
   // Webhook endpoint - called when routine executes
-  app.post('/webhook/routine-triggered', async (req, res) => {
-    const { routineId, routineName } = req.body;
+  app.get('/webhook/routine-triggered', async (req, res) => {
+    const { routineId, routineName } = req.query;
     
     debugLog(`🔔 Routine triggered: ${routineName} (${routineId})`);
     
@@ -492,6 +492,8 @@ function startWebhookServer() {
       debugLog('🛏️  "Go To Bed" routine detected - checking ALL devices...');
       // When routine triggers, check ALL devices regardless of their scheduled checkTime
       await handleDeviceCheck(null);
+    } else {
+      debugLog(`ℹ️  Routine triggered but it does not match the configured "Go To Bed" routine (ID: ${ROUTINE_ID})`);
     }
 
     res.json({ success: true });
