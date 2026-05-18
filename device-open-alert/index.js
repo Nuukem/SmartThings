@@ -4,7 +4,7 @@ const axios = require('axios');
 const Pushover = require('pushover-notifications');
 const fs = require('fs');
 const path = require('path');
-require('dotenv').config();
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 // Configuration
 const ST_API_TOKEN = process.env.SMARTTHINGS_TOKEN;
